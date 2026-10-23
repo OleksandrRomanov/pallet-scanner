@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#123b2a">
+<title>Pallet Scanner</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#18231d;background:#f4f7f4}
+*{box-sizing:border-box}body{margin:0;padding:16px;max-width:760px;margin-inline:auto}
+header{background:#123b2a;color:white;padding:20px;border-radius:18px;margin-bottom:16px}
+h1{font-size:25px;margin:0 0 6px}header p{margin:0;color:#d9e8de}
+.card{background:white;border:1px solid #dce5dd;border-radius:16px;padding:16px;margin:12px 0}
+h2{font-size:18px;margin:0 0 12px}
+button,.filelabel{display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:11px;padding:13px 15px;font-size:16px;font-weight:650;background:#17633e;color:white;cursor:pointer;min-height:46px}
+button.secondary,.filelabel.secondary{background:#e8f0ea;color:#173c28}
+button.danger{background:#9c2f2f}
+.actions{display:flex;flex-wrap:wrap;gap:8px}
+input[type=file]{position:absolute;width:1px;height:1px;opacity:0}
+small,.hint{color:#5b6b60;line-height:1.45}
+#reader{width:100%;overflow:hidden;border-radius:12px}
+#reader video{width:100%;border-radius:12px}
+.status{padding:10px 12px;background:#edf4ee;border-radius:10px;margin-top:10px;white-space:pre-wrap}
+.fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+label.field{display:block;font-size:13px;color:#526157}
+.field input{width:100%;margin-top:5px;padding:11px;border:1px solid #ccd8ce;border-radius:9px;font-size:16px;color:#18231d;background:white}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:9px 6px;border-bottom:1px solid #e1e8e2;overflow-wrap:anywhere}th{color:#526157}
+.tablewrap{overflow-x:auto}
+.entry{background:#f7faf7;border:1px solid #e1e8e2;padding:12px;border-radius:10px;margin:8px 0}
+.entry strong{overflow-wrap:anywhere}
+footer{font-size:12px;color:#68756c;padding:12px 2px}
+@media(max-width:420px){body{padding:10px}.fields{grid-template-columns:1fr 1fr}.card{padding:13px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>📦 Pallet Scanner</h1>
+  <p>Сканування GS1-етикеток та експорт даних у TXT</p>
+</header>
+
+<div class="card">
+  <h2>1. Сканування камерою</h2>
+  <p class="hint">Наведи камеру на один штрихкод за раз. Для етикеток GS1-128 скануй усі три коди окремо: товар/кількість, партія/термін, SSCC.</p>
+  <div class="actions">
+    <button id="start">Увімкнути камеру</button>
+    <button id="stop" class="secondary" disabled>Зупинити</button>
+  </div>
+  <div id="reader" style="margin-top:12px"></div>
+  <div id="status" class="status" role="status">Готово до сканування.</div>
+</div>
+
+<div class="card">
+  <h2>2. Перевір та відредагуй дані</h2>
+  <p class="hint">Після сканування код з'явиться нижче. Поля можна заповнити вручну, якщо сканер повернув не всі дані.</p>
+  <div class="fields">
+    <label class="field">SSCC<input id="sscc" placeholder="259003340030925126" inputmode="numeric"></label>
+    <label class="field">GTIN / CODPRO<input id="gtin" placeholder="05900334160003"></label>
+    <label class="field">Кількість (COUNT)<input id="count" placeholder="64" inputmode="numeric"></label>
+    <label class="field">Партія (LOT)<input id="lot" placeholder="608282CK00"></label>
+    <label class="field">Термін (YYYY.MM)<input id="bestbefore" placeholder="2027.06"></label>
+    <label class="field">Сирий код / інше<input id="raw" placeholder="Відскановане значення"></label>
+  </div>
+  <div class="actions" style="margin-top:12px">
+    <button id="add">Додати палету</button>
+    <button id="clearform" class="secondary">Очистити поля</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>3. Список палет (<span id="total">0</span>)</h2>
+  <div id="records"><p class="hint">Поки що палет не додано.</p></div>
+  <div class="actions" style="margin-top:12px">
+    <button id="export">Експортувати TXT</button>
+    <button id="exportcsv" class="secondary">Експортувати CSV</button>
+    <button id="clearall" class="danger">Видалити всі</button>
+  </div>
+  <p class="hint">TXT буде у форматі з роздільником «;», придатному для відкриття/імпорту в Excel або Power Query.</p>
+</div>
+<footer>Прототип. Камера в Safari працює лише через HTTPS або localhost. Сканування залежить від якості фото, типу штрихкоду та підтримки браузером. Перевіряй дані перед використанням у складській системі.</footer>
+
+<script src="https://unpkg.com/@zxing/browser@0.1.5/umd/index.min.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  let reader = null, controls = null;
+  let records = [];
+  const fields = ['sscc','gtin','count','lot','bestbefore','raw'];
+
+  function status(msg){ $('status').textContent = msg; }
+  function clean(s){ return String(s || '').replace(/\u001d/g, '').trim(); }
+
+  // Parses the common GS1 Application Identifiers from a decoded barcode string.
+  // Some scanners return human-readable parentheses; others return GS separators.
+  function parseGS1(value) {
+    const s = String(value || '');
+    const out = {};
+    const paren = /\((00|02|37|15|17|10|01)\)([^()]+)/g;
+    let m;
+    while ((m = paren.exec(s)) !== null) out[m[1]] = m[2].trim();
+    if (Object.keys(out).length) return out;
+
+    // Basic fallback for decoded GS1 data without parentheses.
+    // AI 00: 18 digits; AI 02/01: 14 digits; AI 15/17: 6 digits;
+    // AI 37: variable length (typically followed by AI 10); AI 10: variable.
+    const x = s.replace(/\u001d/g, '|');
+    const ai00 = x.match(/(?:^|\|)00(\d{18})/); if (ai00) out['00'] = ai00[1];
+    const ai02 = x.match(/(?:^|\|)02(\d{14})/); if (ai02) out['02'] = ai02[1];
+    const ai01 = x.match(/(?:^|\|)01(\d{14})/); if (ai01) out['01'] = ai01[1];
+    const ai15 = x.match(/(?:^|\|)15(\d{6})/); if (ai15) out['15'] = ai15[1];
+    const ai17 = x.match(/(?:^|\|)17(\d{6})/); if (ai17) out['17'] = ai17[1];
+    const ai10 = x.match(/(?:^|\|)10([^|]+)/); if (ai10) out['10'] = ai10[1];
+    const ai37 = x.match(/(?:^|\|)37(\d{1,8})(?=\||10)/); if (ai37) out['37'] = ai37[1];
+    return out;
+  }
+
+  function dateFromYYMMDD(v) {
+    if (!v || !/^\d{6}$/.test(v)) return '';
+    return v.slice(0,2) + v.slice(2,4) + '.' + v.slice(4,6);
+  }
+
+  function applyDecoded(text) {
+    const value = clean(text);
+    $('raw').value = value;
+    const d = parseGS1(value);
+    if (d['00']) $('sscc').value = d['00'];
+    if (d['02'] || d['01']) $('gtin').value = d['02'] || d['01'];
+    if (d['37']) $('count').value = d['37'];
+    if (d['10']) $('lot').value = d['10'];
+    if (d['15']) $('bestbefore').value = dateFromYYMMDD(d['15']);
+    if (d['17']) $('bestbefore').value = dateFromYYMMDD(d['17']);
+    status('Зчитано: ' + value + (Object.keys(d).length ? '\nРозпізнані GS1-поля: ' + Object.keys(d).join(', ') : '\nАвтоматично розпізнати поля не вдалося. Перевір сирий код і заповни поля вручну.'));
+  }
+
+  $('start').addEventListener('click', async () => {
+    if (!window.ZXingBrowser) {
+      status('Не вдалося завантажити бібліотеку сканування. Перевір інтернет-з’єднання та перезавантаж сторінку.');
+      return;
+    }
+    try {
+      reader = new ZXingBrowser.BrowserMultiFormatReader();
+      $('start').disabled = true; $('stop').disabled = false;
+      status('Запит доступу до камери…');
+      controls = await reader.decodeFromVideoDevice(undefined, $('reader'), (result, err, ctl) => {
+        if (result) {
+          applyDecoded(result.getText());
+          if (navigator.vibrate) navigator.vibrate(100);
+        }
+      });
+      status('Камера активна. Наведи її на один штрихкод.');
+    } catch(e) {
+      $('start').disabled = false; $('stop').disabled = true;
+      status('Не вдалося запустити камеру: ' + (e.message || e) + '\nВідкрий сторінку через HTTPS та дозволь Safari доступ до камери.');
+    }
+  });
+  $('stop').addEventListener('click', () => {
+    if (controls && controls.stop) controls.stop();
+    controls = null; $('reader').innerHTML = '';
+    $('start').disabled = false; $('stop').disabled = true;
+    status('Камеру зупинено.');
+  });
+
+  $('add').addEventListener('click', () => {
+    const r = {};
+    fields.forEach(f => r[f] = $(f).value.trim());
+    if (!r.sscc && !r.gtin && !r.raw) {
+      status('Спочатку відскануй штрихкод або введи SSCC / GTIN / сирий код.');
+      return;
+    }
+    records.push(r); render();
+    fields.forEach(f => $(f).value = '');
+    status('Палету додано до списку.');
+  });
+  $('clearform').addEventListener('click', () => fields.forEach(f => $(f).value = ''));
+
+  function render() {
+    $('total').textContent = records.length;
+    if (!records.length) { $('records').innerHTML = '<p class="hint">Поки що палет не додано.</p>'; return; }
+    $('records').innerHTML = records.map((r,i) => `<div class="entry"><strong>${i+1}. ${escapeHtml(r.sscc || r.raw || 'Без SSCC')}</strong><div class="hint">GTIN: ${escapeHtml(r.gtin)} · Кількість: ${escapeHtml(r.count)} · LOT: ${escapeHtml(r.lot)} · Термін: ${escapeHtml(r.bestbefore)}</div><button class="secondary" data-del="${i}" style="margin-top:8px">Видалити</button></div>`).join('');
+    $('records').querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => { records.splice(Number(b.dataset.del),1); render(); }));
+  }
+  function escapeHtml(s) { return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  function download(name, content, type) {
+    const blob = new Blob(['\ufeff', content], {type});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  const header = ['SSCC','GTIN','COUNT','LOT','BEST_BEFORE','RAW'];
+  function val(r,k){return String(r[k] || '').replace(/[\r\n;]/g,' ');}
+  $('export').addEventListener('click', () => {
+    if (!records.length) { status('Немає даних для експорту.'); return; }
+    const txt = [header.join(';'), ...records.map(r => [r.sscc,r.gtin,r.count,r.lot,r.bestbefore,r.raw].map(v => val({v},'v')).join(';'))].join('\r\n');
+    download('pallets.txt', txt, 'text/plain;charset=utf-8');
+  });
+  $('exportcsv').addEventListener('click', () => {
+    if (!records.length) { status('Немає даних для експорту.'); return; }
+    const csvVal = v => '"' + String(v || '').replace(/"/g,'""') + '"';
+    const csv = [header, ...records.map(r => [r.sscc,r.gtin,r.count,r.lot,r.bestbefore,r.raw])].map(row => row.map(csvVal).join(';')).join('\r\n');
+    download('pallets.csv', csv, 'text/csv;charset=utf-8');
+  });
+  $('clearall').addEventListener('click', () => {
+    if (confirm('Видалити всі палети зі списку?')) { records=[]; render(); status('Список очищено.'); }
+  });
+})();
+</script>
+</body>
+</html>
